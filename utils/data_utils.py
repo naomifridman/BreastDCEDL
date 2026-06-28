@@ -108,6 +108,7 @@ MASK_SUFFIX = {
 base_path: str | None = None
 nifti_path: dict[str, str] = {}
 mask_path:  dict[str, str] = {}
+_duke_metadata_cache: pd.DataFrame | None = None
 
 
 def setup_paths(base: str, nifti_dirs: dict[str, str], mask_dirs: dict[str, str]):
@@ -175,14 +176,70 @@ def get_nifti_mask(pid: str, deb=0):
         elif 'ACRIN-6698' in pid: fpath=mask_path['spy2']
         elif 'MRI' in pid: fpath=mask_path['duke']
         else: return None
+        if not os.path.isdir(fpath):
+            if deb: print('mask directory missing', pid, fpath)
+            return _get_duke_bbox_mask(pid, deb=deb)
         x=os.listdir(fpath)
         if deb: print(pid,fpath)
         x=[c for c in x if pid in c]
         if deb: print(x)
+        if len(x) == 0:
+            if deb: print('mask not found', pid)
+            return _get_duke_bbox_mask(pid, deb=deb)
         if len(x)>1:
             print('error in mask',pid)
         m=read_nifti(os.path.join(fpath,x[0]))
         return m
+
+
+def _load_duke_metadata() -> pd.DataFrame | None:
+        global _duke_metadata_cache
+        if _duke_metadata_cache is not None:
+            return _duke_metadata_cache
+        if base_path is None:
+            return None
+        candidates = [
+            Path(base_path) / "DUKE" / "BreastDCEDL_duke_metadata.csv",
+            Path(base_path) / "DUKE" / "BreastDCEDL_duke_cropped.csv",
+        ]
+        for path in candidates:
+            if path.is_file():
+                _duke_metadata_cache = pd.read_csv(path)
+                return _duke_metadata_cache
+        return None
+
+
+def _get_duke_bbox_mask(pid: str, deb=0):
+        if "MRI" not in pid:
+            return None
+        meta = _load_duke_metadata()
+        if meta is None:
+            if deb: print("duke metadata missing", pid)
+            return None
+        row = meta[meta["pid"].astype(str) == str(pid)]
+        if row.empty:
+            if deb: print("duke bbox row missing", pid)
+            return None
+        row = row.iloc[0]
+        required = ("mask_start", "mask_end", "sraw", "eraw", "scol", "ecol")
+        if any(pd.isna(row[c]) for c in required):
+            if deb: print("duke bbox columns incomplete", pid)
+            return None
+        a0 = get_nifti_acquisition(pid, idx=0)
+        if a0 is None:
+            if deb: print("duke acquisition missing for bbox mask", pid)
+            return None
+        startm = int(row["mask_start"])
+        endm = int(row["mask_end"])
+        sraw = int(row["sraw"])
+        eraw = int(row["eraw"])
+        scol = int(row["scol"])
+        ecol = int(row["ecol"])
+        mask = np.zeros(a0.shape, dtype=np.uint8)
+        mask[startm:min(endm + 1, mask.shape[0]), sraw:min(eraw + 1, mask.shape[1]), scol:min(ecol + 1, mask.shape[2])] = 1
+        if deb:
+            print("using duke bbox fallback", pid, (startm, endm, sraw, eraw, scol, ecol))
+        return mask
 
 # --------------------------------------------------------------------- #
 #                 Simple statistics / bounding boxes                    #
